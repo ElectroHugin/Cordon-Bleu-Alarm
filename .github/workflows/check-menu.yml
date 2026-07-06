@@ -1,0 +1,60 @@
+name: Bethesda Menu Check
+
+on:
+  schedule:
+    # Montag 05:30 UTC = 06:30 (Winterzeit) bzw. 07:30 (Sommerzeit) Schweizer Zeit.
+    # Cron kennt keine Zeitzonen, daher bewusst früh angesetzt (lieber zu früh als zu spät).
+    - cron: "30 5 * * 1"
+  workflow_dispatch:
+    inputs:
+      test_notification:
+        description: "Nur Test-Benachrichtigung senden (kein echter Menü-Check)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write   # nötig, damit der Job notified_dates.json zurück committen darf
+
+jobs:
+  check-menu:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Repo auschecken
+        uses: actions/checkout@v4
+
+      - name: Python einrichten
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Abhängigkeiten installieren
+        run: pip install -r requirements.txt
+
+      - name: Menü prüfen
+        env:
+          # Beide Benachrichtigungskanäle sind unabhängig voneinander optional.
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          # Gesuchte Gerichte, kommagetrennt. Nicht sensibel, kann alternativ
+          # auch als Repository Variable (vars.KEYWORDS) gepflegt werden.
+          KEYWORDS: ${{ secrets.KEYWORDS }}
+          # Wird nur bei manuellem Trigger mit gesetzter Checkbox auf "1" gesetzt
+          TEST_NOTIFICATION: ${{ (github.event_name == 'workflow_dispatch' && inputs.test_notification) && '1' || '' }}
+        run: python menu_check.py
+
+      - name: Status-Datei committen (falls geändert)
+        run: |
+          git config user.name "menu-checker-bot"
+          git config user.email "actions@users.noreply.github.com"
+          if ! git diff --quiet notified_dates.json; then
+            git add notified_dates.json
+            git commit -m "Update notified_dates.json [skip ci]"
+            git push
+          else
+            echo "Keine Änderungen an notified_dates.json"
+          fi

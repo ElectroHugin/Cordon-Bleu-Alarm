@@ -1,4 +1,22 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Bethesda Mittagsmenü-Checker
+# Copyright (C) 2026 <Dein Name>
+#
+# Dieses Programm ist freie Software: Sie können es unter den Bedingungen
+# der GNU General Public License, wie von der Free Software Foundation
+# veröffentlicht, weitergeben und/oder modifizieren, entweder gemäss
+# Version 3 der Lizenz oder (nach Ihrer Wahl) jeder späteren Version.
+#
+# Die Veröffentlichung dieses Programms erfolgt in der Hoffnung, dass es
+# Ihnen von Nutzen sein wird, aber OHNE JEDE GEWÄHRLEISTUNG - sogar ohne
+# die implizite Gewährleistung der MARKTFÄHIGKEIT oder EIGNUNG FÜR EINEN
+# BESTIMMTEN ZWECK. Details finden Sie in der GNU General Public License.
+#
+# Sie sollten eine Kopie der GNU General Public License zusammen mit
+# diesem Programm erhalten haben. Falls nicht, siehe
+# <https://www.gnu.org/licenses/>.
 """
 Bethesda Spital Mittagsmenü-Checker.
 

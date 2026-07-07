@@ -134,14 +134,23 @@ den nächsten Montag zu warten.
 
 ## Gesuchte Gerichte anpassen (auch in Zukunft)
 
-Standardmässig wird nach Fleischkäse, Leberkäse und Cordon Bleu gesucht.
+Standardmässig (im veröffentlichten Code) wird nur nach Cordon Bleu gesucht.
 Das lässt sich jederzeit ändern, **ohne den Code anzufassen** - einfach ein
 Secret `KEYWORDS` (oder eine Repository Variable, siehe Hinweis unten)
 mit einer kommagetrennten Liste hinterlegen:
 
 ```
-Fleischkäse, Leberkäse, Cordon Bleu, Wienerschnitzel, Zürcher Geschnetzeltes
+Cordon Bleu, Fleischkäse, Leberkäse, Wienerschnitzel, Zürcher Geschnetzeltes
 ```
+
+**Wichtig - `KEYWORDS` überschreibt, es ergänzt nicht:** Ist das Secret
+gesetzt, wird **ausschliesslich** die dort eingetragene Liste verwendet,
+der Code-Default wird komplett ignoriert. Wer also z.B. privat zusätzlich
+zu Cordon Bleu auch Fleischkäse und Leberkäse gemeldet bekommen möchte,
+muss **alle drei zusammen** ins Secret schreiben - nicht nur die neuen
+Begriffe. Setzt man `KEYWORDS="Schnitzel"`, wird **nur** noch nach
+Schnitzel gesucht, Cordon Bleu fällt komplett weg, solange es nicht mit
+im Secret steht.
 
 Das Skript ist bei der Schreibweise recht tolerant:
 - **Umlaute:** `ä`/`ö`/`ü`/`ß` matchen automatisch auch die ausgeschriebene
@@ -152,8 +161,8 @@ Das Skript ist bei der Schreibweise recht tolerant:
   `Wiener Schnitzel` → matcht auch `Wienerschnitzel`.
 - **Gross-/Kleinschreibung** spielt keine Rolle.
 
-Wenn `KEYWORDS` nicht gesetzt ist, gilt automatisch die ursprüngliche
-Dreier-Liste (Fleischkäse/Leberkäse/Cordon Bleu) als Default.
+Wenn `KEYWORDS` nicht gesetzt ist, gilt automatisch der Code-Default
+(Cordon Bleu) - siehe `DEFAULT_KEYWORDS` in `menu_check.py`.
 
 *Hinweis:* Da die Gerichte-Liste keine sensible Information ist, kannst du
 sie statt als Secret auch bequemer einsehbar als
@@ -161,33 +170,6 @@ sie statt als Secret auch bequemer einsehbar als
 Actions → Variables → New repository variable`, Name `KEYWORDS`) - der
 Workflow müsste dann `${{ vars.KEYWORDS }}` statt `${{ secrets.KEYWORDS }}`
 referenzieren (eine Zeile in `check-menu.yml`).
-
-## Hinweise vor der Veröffentlichung als öffentliches Repo
-
-Kurz-Checkliste, falls du das Repo public stellst:
-
-- [ ] **LICENSE-Datei vorhanden** (siehe [Lizenz](#lizenz--license) unten).
-- [ ] **Keine echten Zugangsdaten im Code oder in `notified_dates.json`**
-      committen - alles läuft über GitHub Secrets, die selbst bei
-      öffentlichen Repos nicht einsehbar sind (auch nicht für dich selbst
-      im Nachhinein, nur überschreibbar).
-- [ ] **ntfy-Topic-Name zufällig wählen**, nicht z.B. deinen echten Namen
-      oder etwas leicht Erratbares - er ist faktisch öffentlich.
-- [ ] **Persönliche E-Mail-Adressen** landen nur als Secret-*Wert*, nie im
-      Klartext im Code oder in Commit-Messages.
-- [ ] **Scraping-Etikette:** das Skript lädt die Zielseite nur einmal pro
-      Woche - das ist unproblematisch, trotzdem lohnt ein Blick in
-      robots.txt/Nutzungsbedingungen der Zielseite, falls du die URL oder
-      Frequenz änderst.
-- [ ] **Kein offizieller Bezug**: Disclaimer oben (keine Verbindung zum
-      Bethesda Spital) drin lassen, um Verwechslungen zu vermeiden.
-- [ ] **Forks/Weiternutzung**: unter GPLv3 dürfen andere den Code frei
-      nutzen/verändern/weitergeben, müssen abgeleitete Werke aber ebenfalls
-      unter GPL(-kompatibler Lizenz) stellen und Änderungen kennzeichnen.
-      Das ist normales GPL-Verhalten, keine zusätzliche Aktion deinerseits
-      nötig.
-- [ ] Optional: `<Dein Name>` im Copyright-Header von `menu_check.py`
-      durch deinen tatsächlichen Namen/Pseudonym ersetzen.
 
 ## Lizenz / License
 
@@ -330,14 +312,22 @@ waiting for the next Monday.
 
 ## Customizing the target dishes (now and in the future)
 
-By default the script looks for Fleischkäse, Leberkäse, and Cordon Bleu.
+By default (in the published code), the script only looks for Cordon Bleu.
 This can be changed anytime **without touching the code** - just set a
 `KEYWORDS` secret (or repository variable, see note below) with a
 comma-separated list:
 
 ```
-Fleischkäse, Leberkäse, Cordon Bleu, Wienerschnitzel, Zürcher Geschnetzeltes
+Cordon Bleu, Fleischkäse, Leberkäse, Wienerschnitzel, Zürcher Geschnetzeltes
 ```
+
+**Important - `KEYWORDS` overrides, it doesn't merge:** if the secret is
+set, **only** the list in it is used - the code default is fully ignored.
+So if you want to keep getting notified about Cordon Bleu *and* add
+Fleischkäse/Leberkäse, you must put **all three together** in the secret,
+not just the new terms. Setting `KEYWORDS="Schnitzel"` means **only**
+Schnitzel is searched for - Cordon Bleu drops out entirely unless it's
+also listed in the secret.
 
 The script is fairly tolerant of spelling:
 - **Umlauts:** `ä`/`ö`/`ü`/`ß` automatically also match the spelled-out
@@ -348,8 +338,8 @@ The script is fairly tolerant of spelling:
   also matches `Wienerschnitzel`.
 - **Case** doesn't matter.
 
-If `KEYWORDS` isn't set, the original default list (Fleischkäse/Leberkäse/
-Cordon Bleu) applies automatically.
+If `KEYWORDS` isn't set, the code default (Cordon Bleu) applies
+automatically - see `DEFAULT_KEYWORDS` in `menu_check.py`.
 
 *Note:* since the dish list isn't sensitive information, you can maintain
 it more conveniently as a **repository variable** instead of a secret
@@ -357,28 +347,6 @@ it more conveniently as a **repository variable** instead of a secret
 variable`, name `KEYWORDS`) - the workflow would then need to reference
 `${{ vars.KEYWORDS }}` instead of `${{ secrets.KEYWORDS }}` (one line in
 `check-menu.yml`).
-
-## Checklist before making the repo public
-
-- [ ] **LICENSE file present** (see [License](#lizenz--license) above).
-- [ ] **No real credentials committed** in code or `notified_dates.json` -
-      everything goes through GitHub Secrets, which stay hidden even on
-      public repos (not even visible to you afterwards, only overwritable).
-- [ ] **Pick a random ntfy topic name**, not something guessable like your
-      real name - it's effectively public.
-- [ ] **Personal email addresses** only ever go in as a secret *value*,
-      never in plaintext in code or commit messages.
-- [ ] **Scraping etiquette:** the script only loads the target page once a
-      week, which is unproblematic - still worth checking the target
-      site's robots.txt/terms if you change the URL or frequency.
-- [ ] **No official affiliation**: keep the disclaimer above (no
-      connection to Bethesda Spital) to avoid confusion.
-- [ ] **Forks/reuse**: under GPLv3, others may freely use/modify/
-      redistribute the code, but derivative works must also be released
-      under a GPL(-compatible) license with changes marked. This is normal
-      GPL behavior, no extra action needed on your part.
-- [ ] Optionally replace `<Dein Name>` in the copyright header of
-      `menu_check.py` with your actual name or pseudonym.
 
 ## License
 

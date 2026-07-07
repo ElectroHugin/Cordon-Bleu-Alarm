@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
 # Bethesda Mittagsmenü-Checker
-# Copyright (C) 2026 <Dein Name>
+# Copyright (C) 2026 Edmund Jochim
 #
 # Dieses Programm ist freie Software: Sie können es unter den Bedingungen
 # der GNU General Public License, wie von der Free Software Foundation
@@ -72,10 +72,13 @@ NTFY_ENABLED = bool(NTFY_TOPIC)
 WEEKDAYS = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"]
 
 # --- Gerichte-Stichwörter ----------------------------------------------------
-# Konfigurierbar über die Umgebungsvariable KEYWORDS (kommagetrennt), ohne
-# Codeänderung. Beispiel: KEYWORDS="Fleischkäse, Leberkäse, Cordon Bleu, Wienerschnitzel"
-# Fällt auf die drei ursprünglichen Gerichte zurück, wenn nicht gesetzt.
-DEFAULT_KEYWORDS = "Fleischkäse, Leberkäse, Cordon Bleu, Kordon Bleu"
+# Konfigurierbar über die Umgebungsvariable KEYWORDS (kommagetrennt) - siehe
+# README, Abschnitt "Gesuchte Gerichte anpassen". WICHTIG: KEYWORDS ersetzt
+# diesen Default vollständig, es wird NICHT ergänzt/zusammengeführt. Wer also
+# z.B. zusätzlich zu Cordon Bleu auch Fleischkäse/Leberkäse melden will, muss
+# ALLE gewünschten Begriffe zusammen ins Secret schreiben, z.B.:
+#   KEYWORDS="Cordon Bleu, Fleischkäse, Leberkäse"
+DEFAULT_KEYWORDS = "Cordon Bleu, Kordon Bleu"
 
 UMLAUT_ALTERNATIVES = {
     "ä": "(?:ä|ae)",
@@ -204,8 +207,11 @@ def send_email(title: str, message: str, date_iso: str):
 
 def notify_all(date_iso: str, snippet: str):
     """Schickt die Benachrichtigung über alle aktivierten Kanäle (0, 1 oder 2)."""
-    title = f"Cordon Bleu Alarm! Montag {date_iso}"
-    message = f"Mittagsmenü am Montag, {date_iso}:\n{snippet}\n\n{URL}"
+    title = f"Menü-Treffer! Montag {date_iso}"
+    message = (
+        f"Mittagsmenü am Montag, {date_iso}, enthält eines der gesuchten Gerichte "
+        f"({', '.join(ACTIVE_KEYWORDS)}):\n{snippet}\n\n{URL}"
+    )
     dispatch_notification(title, message, date_iso)
 
 

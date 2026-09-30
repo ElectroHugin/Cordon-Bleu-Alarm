@@ -41,10 +41,16 @@ Bereits gemeldete Treffer werden in notified_dates.json gemerkt, damit nicht
 mehrfach für dasselbe benachrichtigt wird (Einzeltag: ISO-Datum, ganze Woche:
 "woche:JJJJ-Wnn").
 
-Aufrufe:
-  python menu_check.py                    normaler Check
-  python menu_check.py --test             Test-Benachrichtigung (Beispieltreffer)
-  python menu_check.py --dump-pdf [DATEI] zeigt, was aus den PDFs gelesen wird
+Aufrufe (im GitHub-Workflow über die Auswahl "modus" bzw. MODUS=...):
+  python menu_check.py                          normaler Check (Meldung an den Verteiler)
+  python menu_check.py --trockenlauf [PDF...]   echter Check, Meldung NUR an dich, ohne
+                                                notified_dates.json zu ändern
+  python menu_check.py --test [ntfy|email|beide] Test-Benachrichtigung NUR an dich
+  python menu_check.py --test alle              Testmail an den GANZEN Verteiler (EMAIL_TO)
+  python menu_check.py --dump-pdf [PDF...]      zeigt, was aus den PDFs gelesen wird
+Tests, Trockenläufe und Problem-Meldungen gehen nie an EMAIL_TO, sondern an
+NTFY_TOPIC_DEBUG (sonst NTFY_TOPIC) und EMAIL_TO_DEBUG (leer = keine Debug-Mail).
+Ausnahme: "test-alle" schickt bewusst eine Testmail an den ganzen Verteiler (EMAIL_TO).
 """
 from __future__ import annotations
 
@@ -89,8 +95,46 @@ EMAIL_TO = [
 ]
 EMAIL_FROM = os.environ.get("EMAIL_FROM", "").strip() or SMTP_USER
 
-EMAIL_ENABLED = bool(SMTP_HOST and SMTP_USER and SMTP_PASSWORD and EMAIL_TO)
-NTFY_ENABLED = bool(NTFY_TOPIC)
+def split_addresses(raw: str) -> list:
+    return [addr.strip() for addr in re.split(r"[,;]", raw or "") if addr.strip()]
+
+
+SMTP_READY = bool(SMTP_HOST and SMTP_USER and SMTP_PASSWORD)
+EMAIL_ENABLED = bool(SMTP_READY and EMAIL_TO)
+
+# --- Debug-Kanäle (nur für dich, NIE an den E-Mail-Verteiler) ----------------
+# Tests, Trockenläufe und Fehlermeldungen gehen ausschliesslich hierhin.
+# NTFY_TOPIC_DEBUG: leer = NTFY_TOPIC. EMAIL_TO_DEBUG: leer = keine Debug-Mail (SMTP_USER ist
+# nur der Absender und wird bewusst NICHT als Empfänger verwendet).
+NTFY_TOPIC_DEBUG = os.environ.get("NTFY_TOPIC_DEBUG", "").strip() or NTFY_TOPIC
+EMAIL_TO_DEBUG = split_addresses(os.environ.get("EMAIL_TO_DEBUG", ""))
+
+
+@dataclass
+class Targets:
+    """Empfänger einer Benachrichtigung: ntfy-Topic ("" = aus) und E-Mail-Adressen ([] = aus)."""
+
+    name: str
+    ntfy: str
+    email: list
+
+    @property
+    def empty(self) -> bool:
+        return not self.ntfy and not self.email
+
+
+def live_targets() -> Targets:
+    """Echte Treffer: ntfy + kompletter E-Mail-Verteiler."""
+    return Targets("Verteiler", NTFY_TOPIC, EMAIL_TO if EMAIL_ENABLED else [])
+
+
+def debug_targets(ntfy: bool = True, email: bool = True) -> Targets:
+    """Nur du: Debug-Topic und/oder Debug-Adresse."""
+    return Targets(
+        "Debug",
+        NTFY_TOPIC_DEBUG if ntfy else "",
+        EMAIL_TO_DEBUG if (email and SMTP_READY) else [],
+    )
 
 # --- E-Mail-Text anpassen ----------------------------------------------------
 # Leer = Standardvorlage (unten). Platzhalter siehe README bzw. template_values().
@@ -122,23 +166,23 @@ OCR_LANG = os.environ.get("OCR_LANG", "").strip() or "deu"
 WEEKDAYS = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"]
 
 
-def load_days() -> set:
-    """Wochentage, für die Einzeltag-Treffer gemeldet werden (Umgebungsvariable TAGE).
-    Standard: alle Tage. Einschränken z.B. mit TAGE="Montag, Freitag".
-    Ganze-Woche-Treffer werden immer gemeldet."""
-    raw = os.environ.get("TAGE", "").strip() or "alle"
+def parse_days(raw: str, default: str) -> set:
+    """Wochentage aus einer Liste wie "Montag, Freitag" (auch abgekürzt "Mo, Fr" oder "alle")."""
+    raw = raw.strip() or default
     if raw.lower() in ("alle", "all", "*"):
         return set(WEEKDAYS)
     days = set()
-    for token in re.split(r"[,;]", raw):
+    for token in re.split(r"[,;\s]+", raw):
         token = token.strip().lower()
         if len(token) < 2:
             continue
         days.update(wd for wd in WEEKDAYS if wd.lower().startswith(token[:2]))
-    return days or set(WEEKDAYS)
+    return days or parse_days(default, "alle")
 
 
-ACTIVE_DAYS = load_days()
+# Einzeltag-Treffer werden nur für diese Tage gemeldet (Umgebungsvariable TAGE, Standard:
+# alle Tage). Ganze-Woche-Treffer werden immer gemeldet.
+ACTIVE_DAYS = parse_days(os.environ.get("TAGE", ""), "alle")
 
 # --- Gerichte-Stichwörter ----------------------------------------------------
 # Konfigurierbar über die Umgebungsvariable KEYWORDS (kommagetrennt) - siehe
@@ -187,6 +231,43 @@ def load_keywords():
 
 KEYWORD_RE, ACTIVE_KEYWORDS = load_keywords()
 
+# OCR verwechselt gern einzelne Buchstaben ("Cordonbieu", "C0rdonbleu"). Für PDF-Text gibt
+# es daher zusätzlich einen unscharfen Vergleich - nur für Begriffe ab FUZZY_MIN_LEN Buchstaben,
+# damit kurze Wörter (z.B. "Rösti" vs. "Röstz...") keine Fehlalarme auslösen.
+FUZZY_MIN_LEN = 8
+FUZZY_RATIO = 0.8
+_OCR_CONFUSIONS = str.maketrans({"0": "o", "1": "l", "|": "l", "!": "l", "i": "l", "5": "s"})
+
+
+def _norm_letters(text: str) -> str:
+    text = text.lower()
+    for ch, alt in (("ä", "ae"), ("ö", "oe"), ("ü", "ue"), ("ß", "ss"), ("é", "e"), ("è", "e")):
+        text = text.replace(ch, alt)
+    return re.sub(r"[^a-z]", "", text.translate(_OCR_CONFUSIONS))
+
+
+def match_keyword(text: str, fuzzy: bool = False) -> Optional[str]:
+    """Gefundener Text (exakt per Regex) oder - mit fuzzy=True - der Suchbegriff, wenn er
+    OCR-tolerant vorkommt. None = kein Treffer."""
+    m = KEYWORD_RE.search(text)
+    if m:
+        return m.group(0).strip()
+    if not fuzzy:
+        return None
+    from difflib import SequenceMatcher
+
+    hay = _norm_letters(text)
+    for term in ACTIVE_KEYWORDS:
+        needle = _norm_letters(term)
+        n = len(needle)
+        if n < FUZZY_MIN_LEN or len(hay) < n - 2:
+            continue
+        for size in (n - 1, n, n + 1):
+            for i in range(0, max(1, len(hay) - size + 1)):
+                if SequenceMatcher(None, needle, hay[i : i + size]).ratio() >= FUZZY_RATIO:
+                    return term
+    return None
+
 SECTION_RE = re.compile(r"@@H2@@\s*(Mittagsmen[üu]|Abendmen[üu])")
 DAY_RE = re.compile(r"@@H3@@\s*(" + "|".join(WEEKDAYS) + r"),\s*(\d{2})\.(\d{2})\.(\d{4})")
 
@@ -194,8 +275,12 @@ DAY_RE = re.compile(r"@@H3@@\s*(" + "|".join(WEEKDAYS) + r"),\s*(\d{2})\.(\d{2})
 # =============================================================================
 # Hilfsfunktionen
 # =============================================================================
+PROBLEMS: list = []  # Warnungen dieses Laufs, werden am Ende an die Debug-Kanäle gemeldet
+
+
 def warn(msg: str):
     """Warnung; in GitHub Actions als Annotation sichtbar (gelbes Dreieck im Lauf)."""
+    PROBLEMS.append(msg)
     if os.environ.get("GITHUB_ACTIONS"):
         print(f"::warning::{msg}")
     else:
@@ -554,16 +639,15 @@ def table_findings(link: PdfLink, iso_year: int, table: Table) -> list:
 
     for c, head in enumerate(table.header):
         head_text = " ".join(head)
-        if not KEYWORD_RE.search(head_text):
-            continue
-        term = KEYWORD_RE.search(head_text).group(0).strip()
-        return [make("woche", term, _clean_head(head_text))]
+        term = match_keyword(head_text, fuzzy=True)
+        if term:
+            return [make("woche", term, _clean_head(head_text))]
 
     result = []
     for r, row in enumerate(table.body):
         for cell in row:
-            if KEYWORD_RE.search(" ".join(cell)):
-                line = next((ln for ln in cell if KEYWORD_RE.search(ln)), cell[0])
+            if match_keyword(" ".join(cell), fuzzy=True):
+                line = next((ln for ln in cell if match_keyword(ln, fuzzy=True)), cell[0])
                 if WEEKDAYS[r] in ACTIVE_DAYS:
                     result.append(make("tag", line, join_dish(cell), WEEKDAYS[r]))
                 else:
@@ -579,7 +663,7 @@ def fallback_findings(link: PdfLink, iso_year: int, lines: list) -> list:
     if re.search(r"abend\.", text, re.IGNORECASE) and not re.search(r"mittags?\.", text, re.IGNORECASE):
         return []
     for i, ln in enumerate(lines):
-        if KEYWORD_RE.search(ln):
+        if match_keyword(ln, fuzzy=True):
             filename = unquote(link.url.split("?")[0]).rsplit("/", 1)[-1] or f"KW{link.kw}.pdf"
             return [
                 Finding(
@@ -595,11 +679,11 @@ def fallback_findings(link: PdfLink, iso_year: int, lines: list) -> list:
     return []
 
 
-def analyse_pdf(link: PdfLink, today: date) -> list:
+def analyse_pdf(link: PdfLink, today: date, skip_past: bool = True) -> list:
     iso_year = resolve_iso_year(link.kw, today)
     if iso_year is None:
         raise ValueError(f"KW {link.kw} ist keine gültige Kalenderwoche")
-    if date.fromisocalendar(iso_year, link.kw, 7) < today:
+    if skip_past and date.fromisocalendar(iso_year, link.kw, 7) < today:
         # Die Seite nennt am Montagmorgen teils noch die Vorwoche als "aktuelle Woche".
         print(f"[pdf] KW{link.kw}: Woche bereits vorbei - übersprungen")
         return []
@@ -613,6 +697,7 @@ def analyse_pdf(link: PdfLink, today: date) -> list:
             table = read_table(page, grid, allow_ocr)
             chars += table.chars
             print(f"[pdf] KW{link.kw} Seite {pno + 1}: Tabelle erkannt ({table.kind}), {table.chars} Zeichen gelesen")
+            print(f"[pdf] KW{link.kw} Seite {pno + 1}: Spalten: {' | '.join(' '.join(h) for h in table.header)}")
             if table.kind == "mittag":
                 findings += table_findings(link, iso_year, table)
         else:
@@ -629,15 +714,26 @@ def analyse_pdf(link: PdfLink, today: date) -> list:
     return findings
 
 
-def check_pdfs(html: str, today: date) -> list:
-    links = find_pdf_links(html)
+def links_from_sources(sources: list, today: date) -> list:
+    """PDF-Links aus expliziten URLs/Dateien (statt von der Menüseite), KW aus dem Namen."""
+    links = []
+    for src in sources:
+        m = re.search(r"KW\s*0?(\d{1,2})", unquote(src), re.IGNORECASE)
+        links.append(PdfLink(src, int(m.group(1)) if m else today.isocalendar()[1], Path(unquote(src)).name))
+    return links
+
+
+def check_pdfs(html: str, today: date, sources: Optional[list] = None) -> list:
+    """sources: explizite PDF-URLs/Dateien (Trockenlauf/Diagnose). Dann werden auch
+    vergangene Wochen geprüft, damit man z.B. eine alte Cordonbleu-Woche testen kann."""
+    links = links_from_sources(sources, today) if sources else find_pdf_links(html)
     if not links:
         warn("Keine Wochenmenü-PDFs (...KW##.pdf) auf der Seite gefunden - Seitenstruktur geändert?")
         return []
     findings = []
     for link in links:
         try:
-            findings += analyse_pdf(link, today)
+            findings += analyse_pdf(link, today, skip_past=not sources)
         except Exception as exc:  # noqa: BLE001 - ein defektes PDF soll den Rest nicht verhindern
             warn(f"PDF KW{link.kw} konnte nicht geprüft werden: {exc}")
     return sorted(findings, key=lambda f: f.scope != "woche")
@@ -648,10 +744,7 @@ def dump_pdfs(sources: list):
     die Einordnung der Treffer. Ohne Argumente: die auf der Menüseite verlinkten PDFs."""
     today = today_ch()
     if sources:
-        links = []
-        for src in sources:
-            m = re.search(r"KW\s*0?(\d{1,2})", unquote(src), re.IGNORECASE)
-            links.append(PdfLink(src, int(m.group(1)) if m else today.isocalendar()[1], Path(src).name))
+        links = links_from_sources(sources, today)
     else:
         links = find_pdf_links(fetch_html())
         if not links:
@@ -743,11 +836,16 @@ def render(template: str, values: dict, default: str) -> str:
         return default.format_map(_SafeDict(values))
 
 
-def build_messages(f: Finding, test: bool = False) -> dict:
+def build_messages(f: Finding, marker: str = "") -> dict:
     """Liefert {'ntfy': (titel, text), 'email': (betreff, text)}. ntfy nutzt immer die
-    Standardvorlage, die E-Mail die anpassbare (EMAIL_SUBJECT / EMAIL_BODY)."""
+    Standardvorlage, die E-Mail die anpassbare (EMAIL_SUBJECT / EMAIL_BODY).
+    marker: "" (echter Treffer), "TEST" oder "TROCKENLAUF" - wird vorangestellt."""
     values = template_values(f)
-    prefix, note = ("[TEST] ", "TESTNACHRICHT - kein echter Treffer, nur Beispieldaten.\n\n") if test else ("", "")
+    notes = {
+        "TEST": "TESTNACHRICHT - kein echter Treffer, nur Beispieldaten.\n\n",
+        "TROCKENLAUF": "TROCKENLAUF - echter Menü-Check, diese Meldung geht nur an dich (nicht an den Verteiler).\n\n",
+    }
+    prefix, note = (f"[{marker}] ", notes.get(marker, "")) if marker else ("", "")
 
     def clean(subject: str, body: str):
         subject = prefix + " ".join(subject.split())
@@ -763,10 +861,10 @@ def build_messages(f: Finding, test: bool = False) -> dict:
     }
 
 
-def send_ntfy(title: str, message: str, click_url: str, label: str) -> bool:
+def send_ntfy(topic: str, title: str, message: str, click_url: str, label: str) -> bool:
     try:
         resp = requests.post(
-            f"https://ntfy.sh/{NTFY_TOPIC}",
+            f"https://ntfy.sh/{topic}",
             data=message.encode("utf-8"),
             headers={
                 "Title": title.encode("utf-8"),
@@ -784,59 +882,65 @@ def send_ntfy(title: str, message: str, click_url: str, label: str) -> bool:
         return False
 
 
-def send_email(title: str, message: str, label: str) -> bool:
+def send_email(recipients: list, title: str, message: str, label: str) -> bool:
     msg = MIMEText(message, "plain", "utf-8")
     msg["Subject"] = Header(title, "utf-8")
     msg["From"] = EMAIL_FROM
-    msg["To"] = ", ".join(EMAIL_TO)
+    msg["To"] = ", ".join(recipients)
     try:
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as server:
             server.starttls()
             server.login(SMTP_USER, SMTP_PASSWORD)
-            server.sendmail(EMAIL_FROM, EMAIL_TO, msg.as_string())
-        print(f"[email] Notification sent for {label} an {len(EMAIL_TO)} Empfänger")
+            server.sendmail(EMAIL_FROM, recipients, msg.as_string())
+        print(f"[email] Notification sent for {label} an {len(recipients)} Empfänger")
         return True
     except (smtplib.SMTPException, OSError) as exc:
         print(f"[email] Fehler beim Senden: {exc}", file=sys.stderr)
         return False
 
 
-def dispatch_notification(f: Finding, test: bool = False) -> bool:
-    """Schickt über alle aktivierten Kanäle (0, 1 oder 2). True = als erledigt zu werten:
-    mindestens ein Kanal hat geklappt (oder es ist gar keiner konfiguriert, dann nur Log).
-    Schlägt jeder aktivierte Kanal fehl, wird der Treffer NICHT als gemeldet gespeichert
-    und beim nächsten Lauf erneut versucht."""
-    msgs = build_messages(f, test=test)
-    label = "TEST" if test else f.key
-    if not NTFY_ENABLED and not EMAIL_ENABLED:
+def send(targets: Targets, ntfy_msg: tuple, email_msg: tuple, click_url: str, label: str) -> bool:
+    """Schickt an die angegebenen Empfänger. True = mindestens ein Kanal hat geklappt
+    (oder es ist gar keiner konfiguriert, dann nur Log)."""
+    print(f"[senden] {label} -> {targets.name}: ntfy={'ja' if targets.ntfy else 'nein'}, E-Mail an {len(targets.email)}")
+    if targets.empty:
         print(
-            "[warnung] Kein Benachrichtigungskanal konfiguriert (weder NTFY_TOPIC "
-            "noch vollständige SMTP_*/EMAIL_TO Variablen gesetzt) - Treffer wird "
-            "nur ins Log geschrieben.",
+            "[warnung] Kein Benachrichtigungskanal konfiguriert - Meldung wird nur ins Log geschrieben.",
             file=sys.stderr,
         )
-        print(f"{msgs['email'][0]}\n{msgs['email'][1]}")
+        print(f"{email_msg[0]}\n{email_msg[1]}")
         return True
-
     results = []
-    if NTFY_ENABLED:
-        results.append(send_ntfy(*msgs["ntfy"], click_url=f.quell_url, label=label))
-    if EMAIL_ENABLED:
-        results.append(send_email(*msgs["email"], label=label))
+    if targets.ntfy:
+        results.append(send_ntfy(targets.ntfy, *ntfy_msg, click_url=click_url, label=label))
+    if targets.email:
+        results.append(send_email(targets.email, *email_msg, label=label))
     return any(results)
 
 
-def run_test_notification():
-    """Schickt eine klar als Test gekennzeichnete Benachrichtigung mit Beispieldaten über
-    alle aktivierten Kanäle - inkl. deiner E-Mail-Vorlage, so kann man sie vorab ansehen.
-    Verändert notified_dates.json nicht."""
-    print(f"Test-Modus: aktive Keywords wären {', '.join(ACTIVE_KEYWORDS)}")
-    print(f"ntfy aktiv: {NTFY_ENABLED} | E-Mail aktiv: {EMAIL_ENABLED} ({len(EMAIL_TO)} Empfänger)")
+def dispatch_notification(f: Finding, targets: Targets, marker: str = "") -> bool:
+    """Schlägt jeder Kanal fehl, wird der Treffer NICHT als gemeldet gespeichert und beim
+    nächsten Lauf erneut versucht."""
+    msgs = build_messages(f, marker=marker)
+    return send(targets, msgs["ntfy"], msgs["email"], f.quell_url, marker or f.key)
 
-    if not NTFY_ENABLED and not EMAIL_ENABLED:
+
+def run_test_notification(ntfy: bool, email: bool, everyone: bool = False):
+    """Schickt eine klar als Test gekennzeichnete Benachrichtigung mit Beispieldaten - NUR an
+    die Debug-Kanäle (NTFY_TOPIC_DEBUG / EMAIL_TO_DEBUG), nie an den Verteiler. Nutzt deine
+    E-Mail-Vorlage, so kann man sie vorab ansehen. Verändert notified_dates.json nicht."""
+    if everyone:
+        # Bewusst an den ganzen E-Mail-Verteiler, um zu prüfen, ob alle die Mail bekommen
+        targets = Targets("Verteiler (Test)", "", EMAIL_TO if EMAIL_ENABLED else [])
+    else:
+        targets = debug_targets(ntfy=ntfy, email=email)
+    print(f"Test-Modus: aktive Keywords wären {', '.join(ACTIVE_KEYWORDS)}")
+    print(f"Test geht an ({targets.name}): ntfy={'ja' if targets.ntfy else 'nein'} | E-Mail an {len(targets.email)} Adresse(n)")
+
+    if targets.empty:
         print(
-            "Kein Kanal konfiguriert - es gibt nichts zu testen. Bitte "
-            "NTFY_TOPIC und/oder SMTP_*/EMAIL_TO setzen.",
+            "Kein passender Debug-Kanal konfiguriert - es gibt nichts zu testen. Bitte "
+            "NTFY_TOPIC(_DEBUG) und/oder SMTP_* + EMAIL_TO_DEBUG setzen.",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -852,10 +956,19 @@ def run_test_notification():
         iso_year=iso[0],
         iso_week=iso[1],
     )
-    ok = dispatch_notification(sample, test=True)
+    ok = dispatch_notification(sample, targets, marker="TEST")
     print("Test abgeschlossen." if ok else "Test fehlgeschlagen - siehe Fehlermeldungen oben.")
     if not ok:
         sys.exit(1)
+
+
+def report_problems(targets: Targets, label: str) -> bool:
+    """Warnungen dieses Laufs (PDF nicht lesbar, keine Links gefunden, ...) an die Debug-Kanäle,
+    damit ein kaputter Checker nicht still eine Cordonbleu-Woche verpasst."""
+    title = f"Menü-Checker: {len(PROBLEMS)} Problem(e)"
+    body = "Der Menü-Check lief, hatte aber Probleme:\n\n" + "\n".join(f"- {p}" for p in PROBLEMS)
+    body += f"\n\nMenüseite: {URL}\n"
+    return send(targets, (title, body), (title, body), URL, label)
 
 
 # =============================================================================
@@ -871,21 +984,19 @@ def save_notified(keys: set):
     STATE_FILE.write_text(json.dumps(sorted(keys), ensure_ascii=False, indent=2))
 
 
-def main():
-    args = sys.argv[1:]
-    if "--test" in args or os.environ.get("TEST_NOTIFICATION") == "1":
-        run_test_notification()
-        return
-    if "--dump-pdf" in args or os.environ.get("DUMP_PDF") == "1":
-        dump_pdfs([a for a in args if not a.startswith("--")])
-        return
-
+def run_check(dry_run: bool = False, sources: Optional[list] = None):
+    """Echter Menü-Check.
+    dry_run=True (Trockenlauf): Treffer gehen NUR an die Debug-Kanäle, auch bereits gemeldete
+    werden erneut gezeigt, notified_dates.json bleibt unverändert."""
     today = today_ch()
     print(f"Suche nach: {', '.join(ACTIVE_KEYWORDS)} | Einzeltage: {', '.join(sorted(ACTIVE_DAYS, key=WEEKDAYS.index))}")
-    html = fetch_html()
+    if dry_run:
+        print("TROCKENLAUF: Meldungen nur an Debug-Kanäle, notified_dates.json wird nicht verändert.")
+    html = "" if sources else fetch_html()
 
-    findings = check_pdfs(html, today) if PDF_CHECK else []
-    findings += find_web_findings(extract_marked_text(html))
+    findings = check_pdfs(html, today, sources) if PDF_CHECK else []
+    if not sources:
+        findings += find_web_findings(extract_marked_text(html))
 
     # Einzeltage, die schon durch einen Ganze-Woche-Treffer abgedeckt sind, nicht extra melden
     week_keys = {f.week_key for f in findings if f.scope == "woche"}
@@ -894,23 +1005,75 @@ def main():
     for f in findings:
         if f.scope == "tag" and f.week_key in week_keys:
             continue
-        if f.key in notified or f.key in seen:
+        if f.key in seen or (f.key in notified and not dry_run):
             continue
+        if f.scope == "tag" and f.day and f.day < today and not sources:
+            continue  # Tag schon vorbei (z.B. bei täglichem Lauf): nicht mehr melden
         seen.add(f.key)
         new.append(f)
 
+    # Probleme gehen immer nur an dich, bei echtem Lauf höchstens einmal pro Woche
+    problem_key = "fehler:{}-W{:02d}".format(*today.isocalendar()[:2])
+    if PROBLEMS and (dry_run or problem_key not in notified):
+        if report_problems(debug_targets(), "PROBLEME") and not dry_run:
+            notified.add(problem_key)
+
+    targets = debug_targets() if dry_run else live_targets()
     if not new:
         print(f"Keine neuen Treffer. ({len(findings)} insgesamt gefunden, bereits gemeldet: {len(notified)})")
-        return
-
     for f in new:
         print(f"Neuer Treffer: {f.key} | {f.scope} | {f.quelle} | {f.gericht}")
-        if dispatch_notification(f):
+        if dispatch_notification(f, targets, marker="TROCKENLAUF" if dry_run else ""):
             notified.add(f.key)
         else:
             warn(f"Benachrichtigung für {f.key} fehlgeschlagen - wird beim nächsten Lauf erneut versucht")
 
-    save_notified(notified)
+    if not dry_run:
+        save_notified(notified)
+
+
+MODES = ("check", "trockenlauf", "test-ntfy", "test-email", "test-beide", "test-alle", "dump-pdf")
+TEST_CHANNELS = ("ntfy", "email", "beide", "alle")
+
+
+def parse_mode(args: list) -> str:
+    """Modus aus Kommandozeile oder Umgebungsvariable MODUS (GitHub-Workflow). Bei der
+    Workflow-Auswahl steht hinter dem Modus noch eine Beschreibung, daher nur das erste Wort."""
+    if "--dump-pdf" in args or os.environ.get("DUMP_PDF") == "1":
+        return "dump-pdf"
+    if "--trockenlauf" in args or "--dry-run" in args:
+        return "trockenlauf"
+    if "--test" in args or os.environ.get("TEST_NOTIFICATION") == "1":
+        which = next((a for a in args if a in TEST_CHANNELS), "beide")
+        return f"test-{which}"
+    raw = (os.environ.get("MODUS", "").strip().split() or ["check"])[0].lower()
+    if raw not in MODES:
+        print(f"Unbekannter MODUS '{raw}'. Erlaubt: {', '.join(MODES)}", file=sys.stderr)
+        sys.exit(2)
+    return raw
+
+
+def main():
+    args = sys.argv[1:]
+    mode = parse_mode(args)
+    sources = [a for a in args if not a.startswith("--") and a not in TEST_CHANNELS]
+    sources += os.environ.get("PDF_URLS", "").split()
+    print(f"Modus: {mode}")
+
+    if mode.startswith("test-"):
+        which = mode.split("-", 1)[1]
+        run_test_notification(
+            ntfy=which in ("ntfy", "beide"), email=which in ("email", "beide"), everyone=which == "alle"
+        )
+    elif mode == "dump-pdf":
+        dump_pdfs(sources)
+    elif mode == "trockenlauf":
+        run_check(dry_run=True, sources=sources or None)
+    else:
+        if sources:
+            print("Im Modus 'check' sind keine eigenen PDF-Quellen erlaubt (nur trockenlauf/dump-pdf).", file=sys.stderr)
+            sys.exit(2)
+        run_check()
 
 
 if __name__ == "__main__":
